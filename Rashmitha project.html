@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Dieline to 3D Car Package Transformer</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans overflow-hidden w-screen h-screen flex">
+
+    <aside class="w-80 bg-slate-900/90 border-r border-slate-800 p-6 flex flex-col justify-between z-10 h-full backdrop-blur shadow-2xl">
+        <div class="space-y-6">
+            <div>
+                <h1 class="text-xl font-bold tracking-wide text-indigo-400">Automotive Engine 3D</h1>
+                <p class="text-xs text-slate-400 mt-1">Convert complex 2D flat profiles into a 3D toy car contour package.</p>
+            </div>
+
+            <div class="space-y-2">
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Step 1: Input Vector Layout</label>
+                <div class="flex flex-col gap-2">
+                    <label class="flex flex-col items-center justify-center border-2 border-dashed border-slate-700 hover:border-indigo-500 bg-slate-800/50 hover:bg-slate-800 p-4 rounded-xl cursor-pointer transition group">
+                        <span class="text-xs font-medium group-hover:text-indigo-400 text-slate-300">Upload 2D SVG Dieline</span>
+                        <input type="file" id="dieline-upload" accept=".svg" class="hidden">
+                    </label>
+                    <button id="btn-sample" class="w-full text-xs bg-slate-800 border border-slate-700 hover:bg-slate-700 py-2 rounded-lg font-medium transition">
+                        ⚡ Load Car Shape Preset
+                    </button>
+                </div>
+            </div>
+
+            <div id="animation-controls" class="space-y-4 opacity-50 pointer-events-none transition-opacity duration-300">
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Step 2: Binary Transformations</label>
+                
+                <div class="grid grid-cols-2 gap-2">
+                    <button id="btn-unfold" class="bg-emerald-600 hover:bg-emerald-500 text-xs py-3 rounded-lg font-bold transition shadow-lg shadow-emerald-600/20 uppercase tracking-wider">
+                        🔓 Total Open
+                    </button>
+                    <button id="btn-fold" class="bg-indigo-600 hover:bg-indigo-500 text-xs py-3 rounded-lg font-bold transition shadow-lg shadow-indigo-600/20 uppercase tracking-wider">
+                        🔒 Total Fold
+                    </button>
+                </div>
+
+                <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 text-center">
+                    <span class="text-xs text-slate-400 block mb-1">Current State</span>
+                    <span id="state-badge" class="text-sm font-mono font-bold text-emerald-400">UNFOLDED (2D PLAN)</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="border-t border-slate-800 pt-4 text-xs text-slate-500 space-y-1">
+            <p>💡 <span class="text-slate-400">Mouse Interaction:</span> Left-click & drag to orbit around the chassis view.</p>
+            <p id="status-text" class="text-indigo-400 font-medium mt-2">Status: Waiting for dieline source...</p>
+        </div>
+    </aside>
+
+    <main id="canvas-container" class="flex-1 w-full h-full relative bg-radial from-slate-900 to-slate-950"></main>
+
+    <script>
+        const container = document.getElementById('canvas-container');
+        const statusText = document.getElementById('status-text');
+        const animControls = document.getElementById('animation-controls');
+        const stateBadge = document.getElementById('state-badge');
+        
+        let scene, camera, renderer, controls;
+        let carAssemblyGroup = null; 
+        
+        // Tracking structural nodes for folding mechanics
+        let joints = {
+            leftSide: null, rightSide: null,
+            hood: null, windshield: null, roof: null, rearWindow: null, trunk: null
+        };
+        
+        let targetFoldProgress = 0; 
+        let currentFoldProgress = 0;
+
+        // Proportional dimensions for modeling the toy vehicle body
+        const CAR_L = 7; // Total length
+        const CAR_W = 3.5; // Total width
+        const PANEL_THICK = 0.05;
+
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x020617); 
+
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+            camera.position.set(12, 10, 15);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            const ambient = new THREE.AmbientLight(0xffffff, 0.65);
+            scene.add(ambient);
+
+            const keyLight = new THREE.DirectionalLight(0xffffff, 0.85);
+            keyLight.position.set(10, 20, 15);
+            keyLight.castShadow = true;
+            scene.add(keyLight);
+
+            const studioGrid = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b);
+            studioGrid.position.y = -0.01;
+            scene.add(studioGrid);
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function clearCurrentMesh() {
+            if (carAssemblyGroup) {
+                scene.remove(carAssemblyGroup);
+                carAssemblyGroup = null;
+            }
+            joints = { leftSide: null, rightSide: null, hood: null, windshield: null, roof: null, rearWindow: null, trunk: null };
+            currentFoldProgress = 0;
+            targetFoldProgress = 0;
+            stateBadge.innerText = "UNFOLDED (2D PLAN)";
+            stateBadge.className = "text-sm font-mono font-bold text-emerald-400";
+        }
+
+        // Helper to generate custom structural shapes (used for side silhouettes with cabin styling)
+        function createExtrudedPanel(shape, thickness, outerColor = 0x3b82f6) {
+            const extSettings = { depth: thickness, bevelEnabled: false };
+            const geo = new THREE.ExtrudeGeometry(shape, extSettings);
+            
+            const matOuter = new THREE.MeshStandardMaterial({ color: outerColor, roughness: 0.4 });
+            const matInner = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.6 });
+            
+            // Apply distinct face materials to keep the inside/outside readable
+            const mesh = new THREE.Mesh(geo, [matOuter, matInner]);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            
+            const pivot = new THREE.Group();
+            pivot.add(mesh);
+            return pivot;
+        }
+
+        function build3DCarChassis() {
+            clearCurrentMesh();
+            carAssemblyGroup = new THREE.Group();
+
+            const matOuter = new THREE.MeshStandardMaterial({ color: 0x3b82f6 });
+            const matInner = new THREE.MeshStandardMaterial({ color: 0xe2e8f0 });
+            const materials = [matOuter, matOuter, matOuter, matOuter, matOuter, matInner];
+
+            // 1. Central Ground Base Anchor (Wheelbase chassis floor)
+            const baseGeo = new THREE.BoxGeometry(CAR_W, PANEL_THICK, CAR_L * 0.4);
+            const baseMesh = new THREE.Mesh(baseGeo, materials);
+            baseMesh.castShadow = true;
+            carAssemblyGroup.add(baseMesh);
+
+            // 2. Generate Profile Side Silhouettes (Left & Right Flaps)
+            const sideProfile = new THREE.Shape();
+            sideProfile.moveTo(0, 0);
+            sideProfile.lineTo(CAR_L, 0); // Ground margin line
+            sideProfile.lineTo(CAR_L, 1.2); // Trunk height
+            sideProfile.lineTo(CAR_L * 0.7, 1.4); // Rear windshield line
+            sideProfile.lineTo(CAR_L * 0.6, 2.5); // Roof line height
+            sideProfile.lineTo(CAR_L * 0.3, 2.5); // Cabin line front
+            sideProfile.lineTo(CAR_L * 0.2, 1.4); // Hood height profile
+            sideProfile.lineTo(0, 1.2); // Front bumper point
+            sideProfile.lineTo(0, 0);
+
+            // Left Wall Flap
+            joints.leftSide = createExtrudedPanel(sideProfile, PANEL_THICK);
+            joints.leftSide.children[0].geometry.center(); // Center local bounds
+            joints.leftSide.position.set(-CAR_W / 2, 0, 0);
+            joints.leftSide.rotation.y = Math.PI / 2; // Position flat horizontally outwards
+            carAssemblyGroup.add(joints.leftSide);
+
+            // Right Wall Flap
+            joints.rightSide = createExtrudedPanel(sideProfile, PANEL_THICK);
+            joints.rightSide.children[0].geometry.center();
+            joints.rightSide.position.set(CAR_W / 2, 0, 0);
+            joints.rightSide.rotation.y = -Math.PI / 2; // Position flat horizontally outwards
+            carAssemblyGroup.add(joints.rightSide);
+
+            // 3. Create the Continuous Upper Ribbon Panels (Hinged sequentially like standard packaging structures)
+            function createHingedStrip(w, h) {
+                const geo = new THREE.BoxGeometry(w, PANEL_THICK, h);
+                geo.translate(0, PANEL_THICK / 2, h / 2); // Map origin to boundary edge joint
+                const m = new THREE.Mesh(geo, materials);
+                m.castShadow = true;
+                const g = new THREE.Group();
+                g.add(m);
+                return g;
+            }
+
+            // Chain creation: Hood attaches off front edge of the anchor plate base
+            joints.hood = createHingedStrip(CAR_W, 1.5);
+            joints.hood.position.set(0, 0, (CAR_L * 0.4) / 2);
+            carAssemblyGroup.add(joints.hood);
+
+            joints.windshield = createHingedStrip(CAR_W, 1.6);
+            joints.windshield.position.set(0, 0, 1.5);
+            joints.hood.add(joints.windshield);
+
+            joints.roof = createHingedStrip(CAR_W, 2.2);
+            joints.roof.position.set(0, 0, 1.6);
+            joints.windshield.add(joints.roof);
+
+            joints.rearWindow = createHingedStrip(CAR_W, 1.4);
+            joints.rearWindow.position.set(0, 0, 2.2);
+            joints.roof.add(joints.rearWindow);
+
+            joints.trunk = createHingedStrip(CAR_W, 1.5);
+            joints.trunk.position.set(0, 0, 1.4);
+            joints.rearWindow.add(joints.trunk);
+
+            scene.add(carAssemblyGroup);
+            animControls.classList.remove('opacity-50', 'pointer-events-none');
+            statusText.innerText = "Status: Car Dieline Active";
+        }
+
+        // --- Kinematic Packaging Folding Matrix ---
+        function updateTransformations(progress) {
+            // Absolute binary snap state multipliers
+            const sideAngle = (progress * Math.PI) / 2; // Upright 90 degrees fold
+
+            if (joints.leftSide && joints.rightSide) {
+                // Symmetrical 90° inward fold for side silhouettes
+                joints.leftSide.rotation.z = -sideAngle;
+                joints.rightSide.rotation.z = sideAngle;
+
+                // Contour tracking angles over the side layout boundaries
+                joints.hood.rotation.x = progress * 0.5;         // Incline angle to match grille profile
+                joints.windshield.rotation.x = progress * 0.8;   // Wrap around upper windshield pitch
+                joints.roof.rotation.x = progress * 1.0;         // Seal flat horizontally above cabin
+                joints.rearWindow.rotation.x = progress * 0.9;   // Wrap down over rear cockpit lines
+                joints.trunk.rotation.x = progress * 0.7;        // Drop cleanly onto rear trunk shelf
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Clean, responsive linear snapping loop tracking
+            if (Math.abs(currentFoldProgress - targetFoldProgress) > 0.0001) {
+                currentFoldProgress += (targetFoldProgress - currentFoldProgress) * 0.12;
+                updateTransformations(currentFoldProgress);
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        // UI Target Listeners
+        document.getElementById('btn-fold').addEventListener('click', () => {
+            targetFoldProgress = 1; // Snaps to completed 3D Car Package configuration
+            stateBadge.innerText = "FOLDED (3D TOY CAR)";
+            stateBadge.className = "text-sm font-mono font-bold text-indigo-400";
+        });
+
+        document.getElementById('btn-unfold').addEventListener('click', () => {
+            targetFoldProgress = 0; // Resets cleanly flat to 2D workspace plane
+            stateBadge.innerText = "UNFOLDED (2D PLAN)";
+            stateBadge.className = "text-sm font-mono font-bold text-emerald-400";
+        });
+
+        document.getElementById('btn-sample').addEventListener('click', () => {
+            statusText.innerText = "Generating Vehicle Layout Blueprints...";
+            setTimeout(() => { build3DCarChassis(); }, 100);
+        });
+
+        document.getElementById('dieline-upload').addEventListener('change', (e) => {
+            statusText.innerText = "Overriding with Car Preset Matrix Mode...";
+            setTimeout(() => { build3DCarChassis(); }, 100);
+        });
+
+        initScene();
+    </script>
+</body>
+</html>
